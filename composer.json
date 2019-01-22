@@ -1,0 +1,31 @@
+{
+    "name": "ptibv/github-outdated",
+    "description": "A simple, configurable tool to check multiple Github repositories for outdated Composer dependencies.",
+    "type": "project",
+    "require": {
+        "php": "~7",
+        "roave/security-advisories": "dev-master",
+        "knplabs/github-api": "^2.10",
+        "symfony/console": "^4.2",
+        "guzzlehttp/guzzle": "^6.3",
+        "php-http/guzzle6-adapter": "~1.1",
+        "symfony/yaml": "^4.2",
+        "ext-json": "*",
+        "symfony/process": "^4.2",
+        "czproject/git-php": "^3.16"
+    },
+    "require-dev": {
+        "roave/security-advisories": "dev-master"
+    },
+    "license": "LGPL",
+    "authors": [
+        {
+            "name": "Sander Krause",
+            "email": "sander.krause@pti.nl"
+        }
+    ],
+    "minimum-stability": "stable",
+    "autoload": {
+        "psr-4": {"app\\": "src/"}
+    }
+}

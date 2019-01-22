@@ -1,0 +1,6 @@
+github:
+  organisation: ""
+  user: ""
+
+composer:
+  path: "/usr/local/bin/composer"
