@@ -1,38 +1,28 @@
-<?php
+<?php /** @noinspection DisconnectedForeachInstructionInspection */
 
 
 namespace app\Commands;
 
 
-use app\Exceptions\InvalidConfigurationException;
+use app\Services\Composer;
+use app\Services\Github;
 use Cz\Git\GitException;
-use Cz\Git\GitRepository;
-use Github\Client;
 use Symfony\Component\Console\Command\Command;
-use Symfony\Component\Console\Helper\ProgressBar;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
-use Symfony\Component\Process\Exception\ProcessFailedException;
-use Symfony\Component\Process\Exception\RuntimeException;
-use Symfony\Component\Process\Process;
 use Symfony\Component\Yaml\Yaml;
 
 /**
  * Class OutdatedCommand
  * @package app\Commands
  */
-class OutdatedCommand extends Command
+final class OutdatedCommand extends Command
 {
     /**
      * @var array
      */
     private $config;
-    
-    /**
-     * @var Client
-     */
-    private $client;
     
     /**
      * @var array
@@ -45,19 +35,14 @@ class OutdatedCommand extends Command
     private $outputDir;
     
     /**
-     * @var int
+     * @var Composer
      */
-    private $terminalWidth;
+    private $composer;
     
     /**
-     * @var OutputInterface
+     * @var Github
      */
-    private $outputStream;
-    
-    /**
-     * @var ProgressBar
-     */
-    private $primaryProgressBar;
+    private $github;
     
     /**
      * @inheritDoc
@@ -65,121 +50,52 @@ class OutdatedCommand extends Command
     protected function configure()
     {
         $this->setName('outdated')
-            ->addOption('direct', 'd', InputOption::VALUE_NONE, 'Check only dependencies listed in each composer.json.')
-            ->addOption('minor-only', 'm', InputOption::VALUE_NONE, 'Checks the configuration for problems.')
+            ->addOption('minor-only', 'm', InputOption::VALUE_NONE, 'Checks only for minor version upgrades.')
             ->addOption('fail-fast', null, InputOption::VALUE_NONE, 'Fail at first error (default false).')
             ->addOption('skip', null, InputOption::VALUE_REQUIRED, 'Comma-separated list of repositories to skip.',
-                [])// @todo implement
+                [])
             ->setDescription('Checks configured Github repositories for outdated Composer dependencies.');
     }
     
     /**
      * @inheritDoc
+     * @throws GitException
      */
     protected function execute(InputInterface $input, OutputInterface $output)
     {
-        if (isset($this->config['github']['organisation'])) {
-            $organisation = $this->config['github']['organisation'];
-            $repositories = $this->client->repository()->org($organisation);
-        }
-        
-        if (!isset($repositories)) {
-            throw new InvalidConfigurationException('Missing either github.organisation or github.username key');
-        }
-        
-        // Filter only for PHP repositories
-        $repositories = array_filter($repositories, function ($repo) {
-            return $repo['language'] === 'PHP';
-        });
-        
-        $repositorySection = $output->section('Repositories');
-        $composerSection = $output->section('Composer');
-        
-        // Force verbosity for consistent progress bar
-        $this->primaryProgressBar = new ProgressBar($repositorySection, \count($repositories));
-        $this->primaryProgressBar->setFormat('%current%/%max% [%bar%] %percent:3s%% %elapsed:6s%/%estimated:-6s% %memory:6s% -- %message%');
-        $this->primaryProgressBar->start();
-        $secondaryProgressBar = new ProgressBar($composerSection, 3);
-        $secondaryProgressBar->setFormat(' %current%/%max% [%bar%] %percent:3s%% -- %message%');
-        $secondaryProgressBar->setMessage('Working...');
-        
-        $failed = false;
-        
+        $skippedRepositories = array_filter(array_map('trim', explode(',', $input->getOption('skip'))));
         $currentWorkingDir = getcwd();
-        foreach ($repositories as $repository) {
-            $this->primaryProgressBar->setMessage($repository['name']);
-            $this->primaryProgressBar->advance();
-            
-            $secondaryProgressBar->clear();
-            $secondaryProgressBar->start();
+        foreach ($this->github->repositories($skippedRepositories) as $repository) {
             
             chdir($this->outputDir);
-            $this->checkoutOrPull($repository);
+            $this->github->checkout($repository);
             // Change working directory to current repository
             chdir($this->outputDir . '/' . $repository['name']);
-            
-            $secondaryProgressBar->setMessage('Running composer install');
-            $secondaryProgressBar->advance();
-            
-            $process = new Process([$this->config['composer']['path'], '-q', 'install']);
-            // Disable timeout
-            $process->setTimeout(null);
-            
-            try {
-                $process->mustRun();
-            } catch (ProcessFailedException $e) {
-                $secondaryProgressBar->setMessage(trim($process->getErrorOutput()));
-                if ($input->getOption('fail-fast')) {
-                    $failed = true;
-                    break;
-                }
+        
+            $process = $this->composer->install();
+            if ($input->getOption('fail-fast') && $process->isSuccessful() === false) {
+                // @todo log error output
+                break;
             }
-            
-            $secondaryProgressBar->setMessage('Running composer outdated');
-            $secondaryProgressBar->advance();
-            // @todo add -d and -m options from $input
-            $process = new Process([$this->config['composer']['path'], 'outdated', '-f', 'json']);
-            // Disable timeout
-            $process->setTimeout(null);
-            try {
-                $process->mustRun();
-            } catch (ProcessFailedException $e) {
-                $secondaryProgressBar->setMessage(trim($process->getErrorOutput()));
-                if ($input->getOption('fail-fast')) {
-                    $failed = true;
-                    break;
-                }
+        
+            // Running composer outdated
+            $process = $this->composer->outdated($input->getOption('minor-only'));
+            if ($input->getOption('fail-fast') && $process->isSuccessful() === false) {
+                // @todo log error output
+                break;
             }
-            
-            $secondaryProgressBar->setMessage('Parsing output');
-            $secondaryProgressBar->advance();
-            
+        
+            // Parsing output
             $processOutput = $process->getOutput();
-            try {
+            $json = json_decode($processOutput, true);
+            // Attempt to fix output, find first { and remove leading characters before
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                $processOutput = preg_replace('/^[^{]+{/', '{', $processOutput);
                 $json = json_decode($processOutput, true);
-                // Attempt to fix output, find first { and remove leading characters before
-                if (json_last_error() !== JSON_ERROR_NONE) {
-                    $processOutput = preg_replace('/^[^{]+{/', '{', $processOutput);
-                    $json = json_decode($processOutput, true);
-                }
-                if ($json !== null) {
-                    file_put_contents($currentWorkingDir . '/' . $repository['name'] . '.json',
-                        json_encode($json, JSON_PRETTY_PRINT));
-                } else {
-                    file_put_contents($currentWorkingDir . '/' . $repository['name'] . '.json', $processOutput);
-                    throw new RuntimeException('invalid json');
-                }
-            } catch (\RuntimeException $e) {
-                $secondaryProgressBar->setMessage($e->getMessage());
-                $secondaryProgressBar->display();
-                if ($input->getOption('fail-fast')) {
-                    $failed = true;
-                    break;
-                }
             }
-        }
-        if ($failed && !$input->getOption('fail-fast')) {
-            $this->primaryProgressBar->finish();
+            if (!empty($json)) {
+                $output->writeln(json_encode($json, JSON_PRETTY_PRINT | JSON_FORCE_OBJECT));
+            }
         }
         // Reset working directory back to what it was
         chdir($currentWorkingDir);
@@ -191,17 +107,13 @@ class OutdatedCommand extends Command
     protected function initialize(InputInterface $input, OutputInterface $output)
     {
         $this->config = $this->readConfiguration();
-        
-        $this->auth = $this->stealComposerAuth();
-        $this->client = new Client();
-        if (isset($this->auth['github-oauth']['github.com'])) {
-            $this->client->authenticate($this->auth['github-oauth']['github.com'], Client::AUTH_HTTP_TOKEN);
-        }
         $this->outputDir = $this->prepareOutputDirectory();
-        
-        $this->terminalWidth = (int)exec('tput cols');
-        
-        $this->outputStream = $output;
+    
+        // @todo service injection? also include logger
+        $this->auth = $this->stealComposerAuth();
+        $this->github = new Github($this->config);
+    
+        $this->composer = new Composer($this->config['composer']['path']);
     }
     
     /**
@@ -239,32 +151,5 @@ class OutdatedCommand extends Command
         }
         
         return realpath($outputDirectory);
-    }
-    
-    /**
-     *
-     * @param array $repository
-     */
-    private function checkoutOrPull(array $repository)
-    {
-        $repoPath = $this->outputDir . '/' . $repository['name'];
-        if (!is_dir($repoPath)) {
-            $this->primaryProgressBar->setMessage(sprintf('Cloning repository %s...', $repository['name']));
-            // Clone new repository
-            try {
-                GitRepository::cloneRepository($repository['ssh_url'])->checkout('master');
-            } catch (GitException $e) {
-                $this->outputStream->writeln($e->getMessage());
-            }
-        } else {
-            // Fetch updates
-            try {
-                $local = new GitRepository($repoPath);
-                $this->primaryProgressBar->setMessage(sprintf('Updating repository %s...', $repository['name']));
-                $local->checkout('master')->pull();
-            } catch (GitException $e) {
-                $this->outputStream->writeln($e->getMessage());
-            }
-        }
     }
 }
