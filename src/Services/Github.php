@@ -17,12 +17,12 @@ final class Github
      * @var array
      */
     private $config;
-    
+
     /**
      * @var Client
      */
     private $client;
-    
+
     /**
      * Github constructor.
      * @param array $config
@@ -31,15 +31,15 @@ final class Github
     public function __construct(array $config, array $auth = [])
     {
         $this->config = $config;
-        
+
         // @todo inject Client and Logger
         $this->client = new Client();
-        
+
         if (isset($auth['github-oauth']['github.com'])) {
             $this->client->authenticate($config['github-oauth']['github.com'], Client::AUTH_HTTP_TOKEN);
         }
     }
-    
+
     /**
      * @param array $skip
      * @return array
@@ -49,25 +49,33 @@ final class Github
         $repositories = [];
         if (isset($this->config['github']['organisation'])) {
             $organisation = $this->config['github']['organisation'];
-            $repositories = $this->client->repository()->org($organisation);
+            $repositories = array_merge($repositories, $this->client->repository()->org($organisation));
         }
         if (isset($this->config['github']['username'])) {
             $user = $this->config['github']['username'];
-            $repositories = $this->client->user()->repositories($user);
+            $repositories = array_merge($repositories, $this->client->user()->repositories($user));
         }
-        
+        // Filter skipped repository names
+        $repositories = array_filter($repositories, function ($repo) use ($skip) {
+            return !in_array($repo['name'], $skip, true);
+        });
+
+        usort($repositories, static function ($repoA, $repoB) {
+            return strtolower($repoA['name']) <=> strtolower($repoB['name']);
+        });
+
         if (!isset($repositories)) {
             throw new InvalidConfigurationException('Missing either github.organisation or github.username key');
         }
-        
+
         // Filter only for PHP repositories
         $repositories = array_diff(array_filter($repositories, function ($repo) {
             return $repo['language'] === 'PHP';
         }), $skip);
-        
+
         return $repositories;
     }
-    
+
     /**
      * @param array $repository
      * @return $this

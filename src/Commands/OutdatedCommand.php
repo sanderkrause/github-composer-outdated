@@ -23,27 +23,27 @@ final class OutdatedCommand extends Command
      * @var array
      */
     private $config;
-    
+
     /**
      * @var array
      */
     private $auth;
-    
+
     /**
      * @var string
      */
     private $outputDir;
-    
+
     /**
      * @var Composer
      */
     private $composer;
-    
+
     /**
      * @var Github
      */
     private $github;
-    
+
     /**
      * @inheritDoc
      */
@@ -52,11 +52,12 @@ final class OutdatedCommand extends Command
         $this->setName('outdated')
             ->addOption('minor-only', 'm', InputOption::VALUE_NONE, 'Checks only for minor version upgrades.')
             ->addOption('fail-fast', null, InputOption::VALUE_NONE, 'Fail at first error (default false).')
-            ->addOption('skip', null, InputOption::VALUE_REQUIRED, 'Comma-separated list of repositories to skip.',
-                [])
+            ->addOption('skip', null, InputOption::VALUE_REQUIRED, 'Comma-separated list of repositories to skip.', [])
+            ->addOption('dry', null, InputOption::VALUE_NONE,
+                'Only show which repositories shall be checked. Do not actually do anything.')
             ->setDescription('Checks configured Github repositories for outdated Composer dependencies.');
     }
-    
+
     /**
      * @inheritDoc
      * @throws GitException
@@ -66,25 +67,29 @@ final class OutdatedCommand extends Command
         $skippedRepositories = array_filter(array_map('trim', explode(',', $input->getOption('skip'))));
         $currentWorkingDir = getcwd();
         foreach ($this->github->repositories($skippedRepositories) as $repository) {
-            
+
+            if ($input->getOption('dry')) {
+                $output->writeln('Dry run, checking ' . $repository['name']);
+            }
+
             chdir($this->outputDir);
             $this->github->checkout($repository);
             // Change working directory to current repository
             chdir($this->outputDir . '/' . $repository['name']);
-        
+
             $process = $this->composer->install();
             if ($input->getOption('fail-fast') && $process->isSuccessful() === false) {
                 // @todo log error output
                 break;
             }
-        
+
             // Running composer outdated
             $process = $this->composer->outdated($input->getOption('minor-only'));
             if ($input->getOption('fail-fast') && $process->isSuccessful() === false) {
                 // @todo log error output
                 break;
             }
-        
+
             // Parsing output
             $processOutput = $process->getOutput();
             $json = json_decode($processOutput, true);
@@ -100,7 +105,7 @@ final class OutdatedCommand extends Command
         // Reset working directory back to what it was
         chdir($currentWorkingDir);
     }
-    
+
     /**
      * @inheritDoc
      */
@@ -108,14 +113,14 @@ final class OutdatedCommand extends Command
     {
         $this->config = $this->readConfiguration();
         $this->outputDir = $this->prepareOutputDirectory();
-    
+
         // @todo service injection? also include logger
         $this->auth = $this->stealComposerAuth();
         $this->github = new Github($this->config);
-    
+
         $this->composer = new Composer($this->config['composer']['path']);
     }
-    
+
     /**
      * Reads configuration from repositories.yml
      * @return array
@@ -124,7 +129,7 @@ final class OutdatedCommand extends Command
     {
         return Yaml::parseFile(PROJECT_ROOT . '/repositories.yml');
     }
-    
+
     /**
      * Attempts to read auth.json from the .composer directory
      * @return array
@@ -135,10 +140,10 @@ final class OutdatedCommand extends Command
         if (is_readable($composerAuthPath)) {
             $auth = json_decode(file_get_contents($composerAuthPath), true);
         }
-        
+
         return $auth ?? [];
     }
-    
+
     /**
      * @throws \RuntimeException
      * @return string Absolute path of the output directory
@@ -149,7 +154,7 @@ final class OutdatedCommand extends Command
         if (!is_dir($outputDirectory) && !mkdir($outputDirectory, 0775, true) && !is_dir($outputDirectory)) {
             throw new \RuntimeException(sprintf('Directory "%s" was not created', $outputDirectory));
         }
-        
+
         return realpath($outputDirectory);
     }
 }
